@@ -1,0 +1,22 @@
+# 模型产物（按 REPORT.md 复跑命令重新生成）
+phase1-asr/onnx/
+phase1-asr/onnx_int8/
+phase2-qwen-asr/onnx/
+phase2-qwen-asr/onnx_int8/
+phase2-qwen-asr/trt_plans/
+phase2-qwen-asr/venv/
+
+# 数据集（hf-mirror 下载，见 REPORT.md）
+phase1-asr/data/*.parquet
+phase1-asr/data/aishell_transcript_v0.8.txt
+
+# 阶段 3：生成的指令音频 + 密钥
+phase3-agent/commands/*.wav
+phase3-agent/commands/*.mp3
+phase3-agent/.env
+
+# 日志与缓存
+*.log
+__pycache__/
+*.pyc
+.claude/
