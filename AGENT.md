@@ -19,7 +19,7 @@
 | 性能压测 / 自动化测试（RTF、首字延迟、内存） | 阶段 1、2 | ✅ 可复跑脚本 + REPORT（RTF/首token/CER 四件套） |
 | 端侧部署（Android） | 阶段 1（ASR） | ✅ 已完成并真机验证 |
 | KVCache 原理（Whisper decoder 实测） | 阶段 1 入门，阶段 2 深化 | ✅ whisper 带/不带 cache 2.34x；Qwen3 prefill/增量一图覆盖 |
-| INT4 量化（AWQ/GPTQ/llama.cpp k-quants） | 阶段 2（小 LLM） | ⬜ 未开始（阶段 2 用 INT8 路线完成，INT4 为可选补充） |
+| INT4 量化（weight-only 4-bit） | 阶段 2（小 LLM） | ✅ 混合精度 HQQ：decoder+lm_head 4-bit、余 int8，0.89→0.64GB；CER 7.63%（诚实结论：ORT CPU 上以速度换体积、不划算，int8 仍更优） |
 | KVCache 深度优化 / 首 token 延迟 / 多请求并发 | 阶段 2（小 LLM） | ◐ 首token 251ms 已实测；并发吞吐未做 |
 | 端侧 Agent 框架 / 工具调用执行闭环 / 多模态语音助手 | 阶段 3（Agent 闭环） | ✅ LangGraph ReAct 闭环：端侧 ASR→LLM 意图→8 工具，8/8 指令正确（含多意图/越界拒绝） |
 | TensorRT | 本机有 NVIDIA 显卡，路线可做 | ✅ TRT 11 FP16 engine：音频编码器 vs ORT CUDA 2.7-4.3x / CPU 45-65x，cos≥0.9987 |
@@ -68,7 +68,11 @@
   逐层定位到 massive activation 误差注入（layer 2 起 max ~84，沿残差流累积）
 - AISHELL-1 200 条同口径：int8 CPU RTF 0.203、首 token 251ms、1010ms/条
 - 对照：PyTorch bf16 CUDA 基线 CER 3.71% / whisper-base int8 22.12%（代差级领先）
-- 未做（可选补充）：INT4（AWQ/GPTQ/k-quants）、多请求并发吞吐
+- INT4（混合精度 HQQ，REPORT 第 5 节）：decoder+lm_head 走 MatMulNBits 4-bit、余三模型
+  复用 int8（Gemm/Gather/Conv 不支持 NBits），0.89→0.64GB（-28%）；RTN 会退化重复崩坏，
+  HQQ 救回。CER 7.63%、RTF 2.62（CPU 解包慢 ~13x）——**诚实结论：ORT CPU 上以速度换体积、
+  不划算，int8 仍更优；INT4 价值在访存受限的 GPU 推理**
+- 未做（可选补充）：多请求并发吞吐
 
 ### 阶段 2.5：TensorRT（✅ 已完成，代码在 `phase2-qwen-asr/trt/`）
 
@@ -134,7 +138,8 @@ M:\projects\AsrDemo\          # 阶段 1 Android demo（独立 git 仓库）
 - [x] 阶段 2 Qwen3-ASR-0.6B 全链路（REPORT 见 `phase2-qwen-asr/bench/REPORT.md`）
 - [x] 阶段 2.5 TensorRT：TRT 11 FP16 engine vs ORT CPU/CUDA 延迟对比（REPORT 第 4 节）
 - [x] 阶段 3 Agent 闭环：LangGraph ReAct（端侧 ASR→LLM 意图→8 工具），8/8 指令正确（REPORT 见 `phase3-agent/REPORT.md`）
-- [ ] 可选补充：INT4（AWQ/GPTQ/k-quants）、并发吞吐、Qwen3-ASR int8 上 Android 真机
+- [x] 可选补充：INT4（混合精度 HQQ 4-bit，REPORT 第 5 节；诚实结论 ORT CPU 上 int8 更优）
+- [ ] 可选补充：并发吞吐、Qwen3-ASR int8 上 Android 真机
 
 ## 关联资料
 

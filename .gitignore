@@ -3,6 +3,7 @@ phase1-asr/onnx/
 phase1-asr/onnx_int8/
 phase2-qwen-asr/onnx/
 phase2-qwen-asr/onnx_int8/
+phase2-qwen-asr/onnx_int4/
 phase2-qwen-asr/trt_plans/
 phase2-qwen-asr/venv/
 

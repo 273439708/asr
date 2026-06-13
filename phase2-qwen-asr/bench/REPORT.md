@@ -133,7 +133,65 @@ fp16 下溢出为 -inf，softmax 全 -inf 行会出 NaN）。
   余弦（0.975-0.991）。按第 2 节 int8 实验的经验（该级别编码器扰动端到端只翻转标点
   类低置信度 token），FP16 编码器对 CER 的影响应小于 int8 路线（推断，未单独跑 200 条）。
 
-## 5. 复跑命令
+## 5. 混合精度 INT4（weight-only 4-bit，2026-06-13）
+
+> 环境补充：onnxruntime 1.26.0（同 CPU EP）· onnx-ir 0.2.1 · `MatMulNBitsQuantizer`（HQQ）
+> 动机：int8 已 0.91GB，但 decoder(423MB)+lm_head(149MB) 仍占 63%，想进一步压。
+
+**为什么是「混合精度」而非全 INT4**：ORT 的 4-bit 权重量化走 `MatMulNBitsQuantizer`，
+产出 `MatMulNBits` contrib 算子——它**只认 MatMul 节点**。五个模型里只有 decoder
+（28 层，252 个 MatMul）和 lm_head（1 个到 151936 词表的大 MatMul）是纯 MatMul；
+audio_transformer 的权重在 Gemm、embed 在 Gather、audio_frontend 在 Conv，NBits 量化器
+碰不到，且音频前端对精度敏感。所以走混合精度：
+
+  decoder + lm_head                  → INT4（MatMulNBits, block=128）
+  audio_frontend/transformer/embed   → 直接复用 onnx_int8 的 INT8 版本
+
+产物 `onnx_int4/` 仍是完整 5 模型目录，可被 `QwenASROnnxPipeline` / bench 原样加载。
+
+**算法选型踩坑：RTN 崩，HQQ 救**（实测）。默认 RTN（round-to-nearest）4-bit 在这颗
+0.6B decoder 上**不可用**：简单短句基本正确，但遇到长/难音频会进入「退化重复」生成环
+（输出失控变长、复读或跳词），200 条 CER 直接爆到 60%~1100%+；block_size 从 128 缩到 32
+只略有缓解。换成 **HQQ**（Half-Quadratic Quantization，数据无关、对 outlier 鲁棒）后 CER
+回到可用区间。这与第 2 节发现一致——LLM 残差流里有 massive activation 异常通道，4-bit 下
+RTN 的均匀量化把这些 outlier 砸坏，HQQ 的鲁棒拟合才扛得住。
+
+**体积**（per-channel int8 vs HQQ int4）：
+
+| 模型 | 精度 | int8 | int4 |
+|---|---|---:|---:|
+| decoder | INT4 | 422.9 | **237.1** |
+| lm_head | INT4 | 149.1 | **83.5** |
+| audio_frontend | INT8 复用 | 22.5 | 22.5 |
+| audio_transformer | INT8 复用 | 168.8 | 168.8 |
+| embed | INT8 复用 | 148.4 | 148.4 |
+| **合计** | | **911.6 (0.89 GB)** | **660.3 (0.64 GB)** |
+
+两块 4-bit 模型各砍 ~44%，但因三个模型仍是 int8，整体只从 0.89GB→0.64GB（**-28%**）。
+
+**端到端**（AISHELL-1 同 200 条 / 16.6 分钟，完全同口径）：
+
+| | CER | RTF | ms/条 | 首 token |
+|---|---:|---:|---:|---:|
+| ONNX fp32 CPU | 3.78% | 0.40-0.64 | 3201 | 872 ms |
+| ONNX int8 CPU | 4.09% | 0.203 | 1010 | 251 ms |
+| ONNX int4 CPU（HQQ 混合） | **7.63%** | **2.617** | **13006** | **1785 ms** |
+
+**诚实结论：在 ORT CPU 上，这条 INT4 路线是「以速度换体积」，且不划算。**
+
+- **精度**：CER 4.09%→7.63%（+3.54pp）。HQQ 已把均值拉回可用，但仍明显高于 int8；且过程
+  CER 从前 25 条的 1.97% 一路漂到 200 条的 7.63%，说明 4-bit decoder 在长/难样本上**偶发
+  退化**（RTN 是灾难性的，HQQ 是温和的），稳定性不如 int8。
+- **速度**：RTF 0.203→2.617（慢 ~13x），首 token 251→1785ms。`MatMulNBits` 在 ORT CPU 上
+  每次推理都要把 4-bit 权重解包回浮点再算，解包开销远超省下的访存——CPU 算力受限场景下
+  得不偿失。
+- **体积**：只省 28%（0.89→0.64GB），因为五分之三的模型卡在 Gemm/Gather/Conv 无法 4-bit。
+
+weight-only 4-bit 的真正价值在**访存受限的 GPU 推理**（解包开销被显存带宽节省盖过），
+不在 ORT CPU。本机结论：这条路线技术上**跑通且 HQQ 让 4-bit 0.6B ASR 可用**，但作为端侧
+CPU 部署方案，**int8 仍是更优解**；INT4 留作 GPU / 专用 runtime 上的备选。
+
+## 6. 复跑命令
 
 ```bash
 cd export
@@ -142,11 +200,13 @@ python verify_onnx.py --onnx ../onnx            # PyTorch 对齐（编码器 dif
 
 cd ../quantize
 python quantize_int8.py --onnx ../onnx --out ../onnx_int8 --layerwise
+python quantize_int4.py --onnx ../onnx --int8 ../onnx_int8 --out ../onnx_int4  # 混合精度 HQQ 4-bit
 
 cd ../bench
 python bench_cer_pytorch.py --num 200           # GPU bf16 基线（需 CUDA）
 python bench_cer_onnx.py --onnx ../onnx --tag fp32 --num 200
 python bench_cer_onnx.py --onnx ../onnx_int8 --tag int8 --num 200
+python bench_cer_onnx.py --onnx ../onnx_int4 --tag int4 --num 200
 
 cd ../trt                                        # TensorRT（需 NVIDIA GPU）
 python trt_bench.py --onnx ../onnx --plan ../trt_plans --iters 50
@@ -155,4 +215,5 @@ python trt_bench.py --onnx ../onnx --plan ../trt_plans --iters 50
 依赖：模型权重 `M:/models/Qwen3-ASR-0.6B`（modelscope 下载）、
 数据 `../../phase1-asr/data/aishell1_test-00000.parquet`（与 Phase 1 共用）、
 venv 见 `pip install qwen-asr onnx onnxruntime jiwer zhconv`（torch 复用系统包）；
+INT4 量化另需 `pip install onnx-ir`；
 TensorRT 部分另需 `pip install tensorrt-cu12 onnxruntime-gpu onnxconverter-common`。
